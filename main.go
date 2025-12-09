@@ -5,79 +5,127 @@ import (
 	"net"
 	"net/smtp"
 	"strings"
-	
+	"time"
 
-	"github.com/gin-gonic/gin"  // ← JUST THIS LINE
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
+
 	r := gin.Default()
 	r.POST("/check", checkEmail)
-
-	fmt.Println("Server running → http://localhost:8081/check")
-	fmt.Println("Send: {\"email\": \"test@aol.com\"}")
+	fmt.Println("DIRECT SMTP RCPT TO VERIFIER → http://localhost:8081/check")
 	r.Run(":8081")
+
 }
 
 func checkEmail(c *gin.Context) {
+
 	var req struct {
 		Email string `json:"email"`
 	}
+
 	if err := c.BindJSON(&req); err != nil || req.Email == "" {
-		c.JSON(400, gin.H{"result": "Invalid request"})
+
+		c.JSON(400, gin.H{"error": "Invalid JSON"})
 		return
+
 	}
 
 	email := strings.ToLower(strings.TrimSpace(req.Email))
 
-	if !strings.HasSuffix(email, "@aol.com") {
-		c.JSON(200, gin.H{"email": email, "result": "Not an AOL email"})
-		return
-	}
+	result := verifyEmailDirect(email)
 
-	exists, err := verifyAOL(email)
+	c.JSON(200, gin.H{
 
-	if err != nil {
-		c.JSON(200, gin.H{
-			"email":  email,
-			"result": "Cannot verify (blocked by AOL)",
-		})
-		return
-	}
-
-	if exists {
-		c.JSON(200, gin.H{
-			"email":  email,
-			"result": "Exists",
-		})
-	} else {
-		c.JSON(200, gin.H{
-			"email":  email,
-			"result": "Does NOT exist",
-		})
-	}
+		"email":  email,
+		"result": result,
+	})
 }
 
-func verifyAOL(email string) (bool, error) {
-	mx, _ := net.LookupMX("aol.com")
-	if len(mx) == 0 {
-		return false, fmt.Errorf("no MX")
+// THIS IS THE REAL DIRECT RCPT TO METHOD — WORKS INSTANTLY
+func verifyEmailDirect(email string) string {
+
+	parts := strings.Split(email, "@")
+
+	if len(parts) != 2 {
+
+		return "Invalid format"
+
 	}
 
-	conn, err := smtp.Dial(mx[0].Host + ":25")
-	if err != nil {
-		return false, err
+	domain := parts[1]
+
+	mx, err := net.LookupMX(domain)
+
+	if err != nil || len(mx) == 0 {
+
+		return "No mail server (invalid domain)"
+
 	}
-	defer conn.Close()
 
-	conn.Mail("test@localhost")
-	err = conn.Rcpt(email)
+	for _, server := range mx {
 
-	if err != nil {
-		if strings.Contains(err.Error(), "550") {
-			return false, nil
+		host := strings.TrimSuffix(server.Host, ".")
+
+		conn, err := net.DialTimeout("tcp", host+":25", 5*time.Second)
+		if err != nil {
+
+			fmt.Println(err)
+			fmt.Println(45)
+
+			continue
+
 		}
-		return false, err
+
+		defer conn.Close()
+
+		client, err := smtp.NewClient(conn, host)
+
+		if err != nil {
+			fmt.Println(err)
+			fmt.Println(50)
+
+			continue
+		}
+
+		defer client.Quit()
+
+		if err := client.Hello("checker.local"); err != nil {
+
+			continue
+
+		}
+
+		if err := client.Mail("test@checker.local"); err != nil {
+			fmt.Println(err)
+			fmt.Println(55)
+
+			continue
+
+		}
+
+		//THIS IS RCPT TO
+		err = client.Rcpt(email)
+		fmt.Println(err)
+		fmt.Println(60)
+
+		if err == nil {
+			fmt.Println(err)
+
+			return "EXISTS (ACTIVE & DELIVERABLE)"
+
+		}
+
+		if strings.Contains(err.Error(), "550") ||
+			strings.Contains(err.Error(), "user unknown") ||
+			strings.Contains(err.Error(), "no such user") {
+			return "DOES NOT EXIST"
+
+		}
+
 	}
-	return true, nil
+
+	return "BLOCKED or TEMPORARY ERROR"
+
 }
